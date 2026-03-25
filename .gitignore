@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+.env
+*.db
+storage/scripts/
+storage/runs/
+.idea/
+.vscode/
+.claude/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+jmeter.log
+New Text Document.txt

@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: jmeter-server
+    runtime: docker
+    plan: free
+    envVars:
+      - key: APP_JMETER_CMD
+        value: jmeter
+      - key: DATABASE_URL
+        value: sqlite:///./jmeter_ai.db
+      - key: STORAGE_ROOT
+        value: ./storage
