@@ -30,11 +30,24 @@ def _compute_transaction_stats(samples: list) -> dict:
             "throughput": 0.0,
         }
 
-    elapsed_values = sorted(s["elapsed"] for s in samples)
-    error_count = sum(1 for s in samples if not s["success"])
-    count = len(samples)
+    # Filter out bogus JMeter values (Long.MAX_VALUE / Long.MIN_VALUE)
+    # that appear for transactions with 0 actual executions
+    MAX_REASONABLE_MS = 3_600_000  # 1 hour max response time
+    valid_samples = [s for s in samples if 0 <= s["elapsed"] <= MAX_REASONABLE_MS]
 
-    timestamps = [s["timestamp"] for s in samples]
+    if not valid_samples:
+        return {
+            "count": 0, "error_count": 0, "error_pct": 0.0,
+            "avg": 0.0, "min": 0, "max": 0,
+            "median": 0.0, "p90": 0.0, "p95": 0.0, "p99": 0.0,
+            "throughput": 0.0,
+        }
+
+    elapsed_values = sorted(s["elapsed"] for s in valid_samples)
+    error_count = sum(1 for s in valid_samples if not s["success"])
+    count = len(valid_samples)
+
+    timestamps = [s["timestamp"] for s in valid_samples]
     min_ts = min(timestamps)
     max_ts = max(timestamps)
     duration_sec = (max_ts - min_ts) / 1000.0 if max_ts > min_ts else 1.0
