@@ -1168,7 +1168,7 @@ def ui_home():
 
         function artifactLinksForRun(runId) {
             const a = latestArtifactsByRun[runId] || {};
-            const report = a.run_id ? `<a class="link-btn" href="/files/report/${a.run_id}" target="_blank">Report</a>` : `<span class="link-btn disabled">Report</span>`;
+            const report = a.run_id ? `<a class="link-btn" href="/files/custom-report/${a.run_id}" target="_blank">Report</a> <a class="link-btn" href="/files/report/${a.run_id}" target="_blank" style="opacity:0.6;font-size:11px;">JMeter</a>` : `<span class="link-btn disabled">Report</span>`;
             const log = a.log_path ? `<a class="link-btn" href="/files/text?path=${encodeURIComponent(a.log_path)}" target="_blank">Log</a>` : `<span class="link-btn disabled">Log</span>`;
             const jtl = a.result_jtl_path ? `<a class="link-btn" href="/files/download?path=${encodeURIComponent(a.result_jtl_path)}" target="_blank">JTL</a>` : `<span class="link-btn disabled">JTL</span>`;
             return report + log + jtl;

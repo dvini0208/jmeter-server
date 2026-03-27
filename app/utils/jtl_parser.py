@@ -1,12 +1,18 @@
 import csv
 import math
+import re
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from pathlib import Path
 
+# HTTP sampler labels typically start with an HTTP method or look like a URL path
+_HTTP_METHOD_PATTERN = re.compile(
+    r"^(GET|POST|PUT|DELETE|PATCH|OPTIONS|HEAD)\s", re.IGNORECASE
+)
+_URL_PATH_PATTERN = re.compile(r"^(https?://|/)")
+
 
 def _percentile(sorted_values: list, pct: float) -> float:
-    """Compute the pct-th percentile from a pre-sorted list."""
     if not sorted_values:
         return 0.0
     k = (len(sorted_values) - 1) * (pct / 100.0)
@@ -18,7 +24,6 @@ def _percentile(sorted_values: list, pct: float) -> float:
 
 
 def _compute_transaction_stats(samples: list) -> dict:
-    """Compute detailed stats for a list of response time samples."""
     if not samples:
         return {
             "count": 0, "error_count": 0, "error_pct": 0.0,
@@ -64,7 +69,6 @@ def _compute_transaction_stats(samples: list) -> dict:
 
 def _is_parent_sample_by_columns(row: dict) -> bool:
     """Detect Transaction Controller parent samples using CSV columns."""
-    # SampleCount > 1 means this is a parent/aggregate sample
     sample_count = row.get("SampleCount", "")
     if sample_count:
         try:
@@ -73,7 +77,6 @@ def _is_parent_sample_by_columns(row: dict) -> bool:
         except (ValueError, TypeError):
             pass
 
-    # If URL column exists and is empty, it's a Transaction Controller
     url = row.get("URL", None)
     if url is not None and url.strip() == "":
         return True
@@ -81,30 +84,41 @@ def _is_parent_sample_by_columns(row: dict) -> bool:
     return False
 
 
-def _detect_transaction_labels(all_labels: set) -> set:
-    """Heuristic: detect Transaction Controller labels when CSV columns
-    can't distinguish them. A label is likely a Transaction Controller if
-    other labels start with it as a prefix (common JMeter naming pattern).
-    e.g., 'Login' is a TC if 'Login-0', 'Login-1' etc. exist.
-    Also detects labels with no URL-like suffix patterns."""
+def _is_http_sampler_label(label: str) -> bool:
+    """Check if a label looks like an HTTP sampler (starts with HTTP method or URL path)."""
+    return bool(_HTTP_METHOD_PATTERN.match(label) or _URL_PATH_PATTERN.match(label))
+
+
+def _classify_by_label(all_labels: set) -> set:
+    """Classify Transaction Controller labels by checking which labels look like
+    HTTP samplers vs custom Transaction Controller names.
+
+    Transaction Controllers typically have custom names like:
+      G10X_S01_WishingTree_Grant_A_Wish_T01_Launch
+    HTTP Samplers typically have labels like:
+      GET /prod/orders, POST /prod/users/login/otp, OPTIONS /prod/clients
+    """
     tc_labels = set()
 
-    label_list = sorted(all_labels)
-    for label in label_list:
-        # Check if this label is a prefix of other labels
-        # Common patterns: "TC_Name" has children "TC_Name-0", "TC_Name-1"
-        # or "TC_Name" has children "TC_Name_Request1"
-        has_children = False
-        for other in label_list:
-            if other != label and (
-                other.startswith(label + "-")
-                or other.startswith(label + "_")
-                or other.startswith(label + " ")
-            ):
-                has_children = True
-                break
-        if has_children:
-            tc_labels.add(label)
+    has_http_labels = any(_is_http_sampler_label(l) for l in all_labels)
+
+    if has_http_labels:
+        # If we have HTTP-style labels, non-HTTP labels are likely TCs
+        for label in all_labels:
+            if not _is_http_sampler_label(label):
+                tc_labels.add(label)
+    else:
+        # No HTTP-style labels: check prefix patterns as fallback
+        label_list = sorted(all_labels)
+        for label in label_list:
+            for other in label_list:
+                if other != label and (
+                    other.startswith(label + "-")
+                    or other.startswith(label + "_")
+                    or other.startswith(label + " ")
+                ):
+                    tc_labels.add(label)
+                    break
 
     return tc_labels
 
@@ -148,10 +162,10 @@ def _parse_csv_rows(path: Path) -> tuple:
                 "is_parent": is_parent,
             })
 
-    # If we couldn't detect by columns, use label heuristic
+    # If we couldn't detect by columns, use label-based classification
     if not can_detect_by_columns and all_rows:
         all_labels = {r["label"] for r in all_rows}
-        tc_labels = _detect_transaction_labels(all_labels)
+        tc_labels = _classify_by_label(all_labels)
         if tc_labels:
             for r in all_rows:
                 if r["label"] in tc_labels:
@@ -204,14 +218,14 @@ def _parse_xml_rows(path: Path) -> tuple:
 
     _collect_samples(root)
 
-    # Fallback: if no structured nesting, use label heuristic
+    # Fallback: if no structured nesting, use label classification
     if not samplers and not transactions:
         flat = []
         for elem in root:
             flat.append(_extract_sample(elem))
 
         all_labels = {s["label"] for s in flat}
-        tc_labels = _detect_transaction_labels(all_labels)
+        tc_labels = _classify_by_label(all_labels)
 
         for s in flat:
             if s["label"] in tc_labels:
@@ -223,7 +237,6 @@ def _parse_xml_rows(path: Path) -> tuple:
 
 
 def _build_grouped_stats(samples: list) -> list:
-    """Group samples by label and compute per-label stats."""
     by_label = defaultdict(list)
     for s in samples:
         by_label[s["label"]].append(s)
@@ -267,7 +280,6 @@ def parse_jtl_summary(jtl_path: str) -> dict:
             empty_result["exists"] = True
             return empty_result
 
-    # Overall stats from individual samplers
     all_for_overall = sampler_samples if sampler_samples else transaction_samples
     total = len(all_for_overall)
     errors = sum(1 for s in all_for_overall if not s["success"])
