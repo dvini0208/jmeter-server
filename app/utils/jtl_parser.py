@@ -27,8 +27,7 @@ def _compute_transaction_stats(samples: list) -> dict:
             "throughput": 0.0,
         }
 
-    # Filter out bogus JMeter values (Long.MAX_VALUE / Long.MIN_VALUE)
-    MAX_REASONABLE_MS = 3_600_000  # 1 hour max response time
+    MAX_REASONABLE_MS = 3_600_000
     valid_samples = [s for s in samples if 0 <= s["elapsed"] <= MAX_REASONABLE_MS]
 
     if not valid_samples:
@@ -63,8 +62,8 @@ def _compute_transaction_stats(samples: list) -> dict:
     }
 
 
-def _is_parent_sample(row: dict) -> bool:
-    """Detect Transaction Controller parent (aggregate) samples."""
+def _is_parent_sample_by_columns(row: dict) -> bool:
+    """Detect Transaction Controller parent samples using CSV columns."""
     # SampleCount > 1 means this is a parent/aggregate sample
     sample_count = row.get("SampleCount", "")
     if sample_count:
@@ -74,7 +73,7 @@ def _is_parent_sample(row: dict) -> bool:
         except (ValueError, TypeError):
             pass
 
-    # If URL column exists and is empty, it's likely a Transaction Controller
+    # If URL column exists and is empty, it's a Transaction Controller
     url = row.get("URL", None)
     if url is not None and url.strip() == "":
         return True
@@ -82,22 +81,46 @@ def _is_parent_sample(row: dict) -> bool:
     return False
 
 
+def _detect_transaction_labels(all_labels: set) -> set:
+    """Heuristic: detect Transaction Controller labels when CSV columns
+    can't distinguish them. A label is likely a Transaction Controller if
+    other labels start with it as a prefix (common JMeter naming pattern).
+    e.g., 'Login' is a TC if 'Login-0', 'Login-1' etc. exist.
+    Also detects labels with no URL-like suffix patterns."""
+    tc_labels = set()
+
+    label_list = sorted(all_labels)
+    for label in label_list:
+        # Check if this label is a prefix of other labels
+        # Common patterns: "TC_Name" has children "TC_Name-0", "TC_Name-1"
+        # or "TC_Name" has children "TC_Name_Request1"
+        has_children = False
+        for other in label_list:
+            if other != label and (
+                other.startswith(label + "-")
+                or other.startswith(label + "_")
+                or other.startswith(label + " ")
+            ):
+                has_children = True
+                break
+        if has_children:
+            tc_labels.add(label)
+
+    return tc_labels
+
+
 def _parse_csv_rows(path: Path) -> tuple:
-    """Parse JTL CSV file and return (sampler_samples, transaction_samples).
-    Samplers = individual HTTP requests.
-    Transactions = Transaction Controller parent/aggregate samples.
-    """
-    samplers = []
-    transactions = []
+    """Parse JTL CSV file and return (sampler_samples, transaction_samples)."""
+    all_rows = []
 
     with path.open("r", encoding="utf-8", errors="ignore", newline="") as f:
         reader = csv.DictReader(f)
         if not reader.fieldnames:
-            return samplers, transactions
+            return [], []
 
         has_url_column = "URL" in reader.fieldnames
         has_sample_count = "SampleCount" in reader.fieldnames
-        can_detect_parents = has_url_column or has_sample_count
+        can_detect_by_columns = has_url_column or has_sample_count
 
         for row in reader:
             try:
@@ -111,20 +134,31 @@ def _parse_csv_rows(path: Path) -> tuple:
 
             success_value = str(row.get("success", "")).strip().lower()
             success = success_value not in {"false", "0", "no"}
-
             label = row.get("label", "Unknown")
 
-            sample = {
+            is_parent = False
+            if can_detect_by_columns:
+                is_parent = _is_parent_sample_by_columns(row)
+
+            all_rows.append({
                 "label": label,
                 "elapsed": elapsed,
                 "timestamp": timestamp,
                 "success": success,
-            }
+                "is_parent": is_parent,
+            })
 
-            if can_detect_parents and _is_parent_sample(row):
-                transactions.append(sample)
-            else:
-                samplers.append(sample)
+    # If we couldn't detect by columns, use label heuristic
+    if not can_detect_by_columns and all_rows:
+        all_labels = {r["label"] for r in all_rows}
+        tc_labels = _detect_transaction_labels(all_labels)
+        if tc_labels:
+            for r in all_rows:
+                if r["label"] in tc_labels:
+                    r["is_parent"] = True
+
+    samplers = [r for r in all_rows if not r["is_parent"]]
+    transactions = [r for r in all_rows if r["is_parent"]]
 
     return samplers, transactions
 
@@ -149,7 +183,6 @@ def _parse_xml_rows(path: Path) -> tuple:
 
         success_value = str(elem.attrib.get("s", "")).strip().lower()
         success = success_value not in {"false", "0"}
-
         label = elem.attrib.get("lb", "Unknown")
 
         return {
@@ -164,20 +197,27 @@ def _parse_xml_rows(path: Path) -> tuple:
             if elem.tag in ("sample", "httpSample"):
                 children = list(elem.findall("sample")) + list(elem.findall("httpSample"))
                 if children:
-                    # Parent sample (Transaction Controller) - add to transactions
                     transactions.append(_extract_sample(elem))
-                    # Recurse into children for individual samplers
                     _collect_samples(elem)
                 else:
-                    # Leaf sample (individual HTTP request)
                     samplers.append(_extract_sample(elem))
 
     _collect_samples(root)
 
-    # Fallback: if no structured nesting, treat all as samplers
+    # Fallback: if no structured nesting, use label heuristic
     if not samplers and not transactions:
+        flat = []
         for elem in root:
-            samplers.append(_extract_sample(elem))
+            flat.append(_extract_sample(elem))
+
+        all_labels = {s["label"] for s in flat}
+        tc_labels = _detect_transaction_labels(all_labels)
+
+        for s in flat:
+            if s["label"] in tc_labels:
+                transactions.append(s)
+            else:
+                samplers.append(s)
 
     return samplers, transactions
 
@@ -212,7 +252,6 @@ def parse_jtl_summary(jtl_path: str) -> dict:
     if not path.exists():
         return empty_result
 
-    # Try CSV first, then XML
     sampler_samples = []
     transaction_samples = []
 
@@ -228,17 +267,14 @@ def parse_jtl_summary(jtl_path: str) -> dict:
             empty_result["exists"] = True
             return empty_result
 
-    # Use samplers for overall stats (individual request metrics)
+    # Overall stats from individual samplers
     all_for_overall = sampler_samples if sampler_samples else transaction_samples
     total = len(all_for_overall)
     errors = sum(1 for s in all_for_overall if not s["success"])
     error_pct = (errors / total * 100) if total else 0.0
 
-    # Build per-label stats for both categories
     sampler_stats = _build_grouped_stats(sampler_samples)
     transaction_stats = _build_grouped_stats(transaction_samples)
-
-    # Overall stats from individual samplers
     overall = _compute_transaction_stats(all_for_overall)
 
     return {

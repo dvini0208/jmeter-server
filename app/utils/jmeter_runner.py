@@ -166,6 +166,30 @@ def execute_run(db: Session, run_id: int) -> None:
     result_jtl = (run_dir / "results.jtl").resolve()
     log_path = (run_dir / "jmeter.log").resolve()
 
+    # Write a custom properties file to ensure proper CSV output format
+    # -J flags don't always work for jmeter.save.saveservice properties
+    custom_props_path = (workspace_dir / "custom.properties").resolve()
+    custom_props_path.write_text(
+        "jmeter.save.saveservice.output_format=csv\n"
+        "jmeter.save.saveservice.print_field_names=true\n"
+        "jmeter.save.saveservice.url=true\n"
+        "jmeter.save.saveservice.sample_count=true\n"
+        "jmeter.save.saveservice.thread_counts=true\n"
+        "jmeter.save.saveservice.connect_time=true\n"
+        "jmeter.save.saveservice.latency=true\n"
+        "jmeter.save.saveservice.bytes=true\n"
+        "jmeter.save.saveservice.sent_bytes=true\n"
+        "jmeter.save.saveservice.data_type=true\n"
+        "jmeter.save.saveservice.label=true\n"
+        "jmeter.save.saveservice.response_code=true\n"
+        "jmeter.save.saveservice.response_message=true\n"
+        "jmeter.save.saveservice.successful=true\n"
+        "jmeter.save.saveservice.thread_name=true\n"
+        "jmeter.save.saveservice.time=true\n"
+        "jmeter.save.saveservice.timestamp_format=ms\n",
+        encoding="utf-8",
+    )
+
     base_cmd = [
         settings.jmeter_bin,
         "-n",
@@ -178,20 +202,12 @@ def execute_run(db: Session, run_id: int) -> None:
         "-e",
         "-o",
         str(report_dir),
+        "-q",
+        str(custom_props_path),
         f"-Jthreads={scenario.threads}",
         f"-Jramp_up={scenario.ramp_up_seconds}",
         f"-Jduration={scenario.duration_seconds}",
         f"-Jramp_down={scenario.ramp_down_seconds}",
-        # Ensure proper CSV output with all required columns
-        "-Jjmeter.save.saveservice.output_format=csv",
-        "-Jjmeter.save.saveservice.print_field_names=true",
-        "-Jjmeter.save.saveservice.url=true",
-        "-Jjmeter.save.saveservice.sample_count=true",
-        "-Jjmeter.save.saveservice.thread_counts=true",
-        "-Jjmeter.save.saveservice.connect_time=true",
-        "-Jjmeter.save.saveservice.latency=true",
-        "-Jjmeter.save.saveservice.bytes=true",
-        "-Jjmeter.save.saveservice.sent_bytes=true",
     ]
 
     for key, value in metrics_props.items():
