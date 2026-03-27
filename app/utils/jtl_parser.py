@@ -31,7 +31,6 @@ def _compute_transaction_stats(samples: list) -> dict:
         }
 
     # Filter out bogus JMeter values (Long.MAX_VALUE / Long.MIN_VALUE)
-    # that appear for transactions with 0 actual executions
     MAX_REASONABLE_MS = 3_600_000  # 1 hour max response time
     valid_samples = [s for s in samples if 0 <= s["elapsed"] <= MAX_REASONABLE_MS]
 
@@ -67,14 +66,47 @@ def _compute_transaction_stats(samples: list) -> dict:
     }
 
 
+def _is_parent_sample(row: dict) -> bool:
+    """Detect Transaction Controller parent (aggregate) samples.
+    Parent samples aggregate multiple child samples and have inflated
+    elapsed times (sum of all children). Including them skews metrics.
+    """
+    # SampleCount > 1 means this is a parent/aggregate sample
+    sample_count = row.get("SampleCount", "")
+    if sample_count:
+        try:
+            if int(sample_count) > 1:
+                return True
+        except (ValueError, TypeError):
+            pass
+
+    # If URL column exists and is empty, it's likely a Transaction Controller
+    # (real HTTP samplers always have a URL)
+    url = row.get("URL", None)
+    if url is not None and url.strip() == "":
+        return True
+
+    return False
+
+
 def _parse_csv_rows(path: Path) -> list:
-    """Parse JTL CSV file and return list of sample dicts."""
+    """Parse JTL CSV file and return list of sample dicts,
+    filtering out Transaction Controller parent samples."""
     samples = []
     with path.open("r", encoding="utf-8", errors="ignore", newline="") as f:
         reader = csv.DictReader(f)
         if not reader.fieldnames:
             return samples
+
+        has_url_column = "URL" in reader.fieldnames
+        has_sample_count = "SampleCount" in reader.fieldnames
+
         for row in reader:
+            # Filter out Transaction Controller parent/aggregate samples
+            if has_url_column or has_sample_count:
+                if _is_parent_sample(row):
+                    continue
+
             try:
                 elapsed = int(row.get("elapsed", 0))
             except (ValueError, TypeError):
@@ -99,31 +131,69 @@ def _parse_csv_rows(path: Path) -> list:
 
 
 def _parse_xml_rows(path: Path) -> list:
-    """Parse JTL XML file and return list of sample dicts."""
+    """Parse JTL XML file and return list of sample dicts.
+    Only includes leaf samples (not parent aggregates)."""
     samples = []
     tree = ET.parse(str(path))
     root = tree.getroot()
-    for elem in root:
-        try:
-            elapsed = int(elem.attrib.get("t", 0))
-        except (ValueError, TypeError):
-            elapsed = 0
-        try:
-            timestamp = int(elem.attrib.get("ts", 0))
-        except (ValueError, TypeError):
-            timestamp = 0
 
-        success_value = str(elem.attrib.get("s", "")).strip().lower()
-        success = success_value not in {"false", "0"}
+    def _collect_leaf_samples(parent):
+        """Recursively collect only leaf-level samples (no sub-samples)."""
+        for elem in parent:
+            if elem.tag in ("sample", "httpSample"):
+                children = list(elem.findall("sample")) + list(elem.findall("httpSample"))
+                if children:
+                    # This is a parent sample - skip it, recurse into children
+                    _collect_leaf_samples(elem)
+                else:
+                    # This is a leaf sample - include it
+                    try:
+                        elapsed = int(elem.attrib.get("t", 0))
+                    except (ValueError, TypeError):
+                        elapsed = 0
+                    try:
+                        timestamp = int(elem.attrib.get("ts", 0))
+                    except (ValueError, TypeError):
+                        timestamp = 0
 
-        label = elem.attrib.get("lb", "Unknown")
+                    success_value = str(elem.attrib.get("s", "")).strip().lower()
+                    success = success_value not in {"false", "0"}
 
-        samples.append({
-            "label": label,
-            "elapsed": elapsed,
-            "timestamp": timestamp,
-            "success": success,
-        })
+                    label = elem.attrib.get("lb", "Unknown")
+
+                    samples.append({
+                        "label": label,
+                        "elapsed": elapsed,
+                        "timestamp": timestamp,
+                        "success": success,
+                    })
+
+    _collect_leaf_samples(root)
+
+    # Fallback: if no leaf samples found, parse flat (no nesting in this JTL)
+    if not samples:
+        for elem in root:
+            try:
+                elapsed = int(elem.attrib.get("t", 0))
+            except (ValueError, TypeError):
+                elapsed = 0
+            try:
+                timestamp = int(elem.attrib.get("ts", 0))
+            except (ValueError, TypeError):
+                timestamp = 0
+
+            success_value = str(elem.attrib.get("s", "")).strip().lower()
+            success = success_value not in {"false", "0"}
+
+            label = elem.attrib.get("lb", "Unknown")
+
+            samples.append({
+                "label": label,
+                "elapsed": elapsed,
+                "timestamp": timestamp,
+                "success": success,
+            })
+
     return samples
 
 

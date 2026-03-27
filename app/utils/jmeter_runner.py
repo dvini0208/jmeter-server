@@ -182,6 +182,16 @@ def execute_run(db: Session, run_id: int) -> None:
         f"-Jramp_up={scenario.ramp_up_seconds}",
         f"-Jduration={scenario.duration_seconds}",
         f"-Jramp_down={scenario.ramp_down_seconds}",
+        # Ensure proper CSV output with all required columns
+        "-Jjmeter.save.saveservice.output_format=csv",
+        "-Jjmeter.save.saveservice.print_field_names=true",
+        "-Jjmeter.save.saveservice.url=true",
+        "-Jjmeter.save.saveservice.sample_count=true",
+        "-Jjmeter.save.saveservice.thread_counts=true",
+        "-Jjmeter.save.saveservice.connect_time=true",
+        "-Jjmeter.save.saveservice.latency=true",
+        "-Jjmeter.save.saveservice.bytes=true",
+        "-Jjmeter.save.saveservice.sent_bytes=true",
     ]
 
     for key, value in metrics_props.items():
