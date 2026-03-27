@@ -37,6 +37,9 @@ EXPOSE 10000
 ENV APP_JMETER_CMD=jmeter
 ENV DATABASE_URL=sqlite:///./jmeter_ai.db
 ENV STORAGE_ROOT=./storage
+# Limit JMeter/Java memory to fit within Render free tier (512MB)
+ENV JVM_ARGS="-Xms128m -Xmx256m"
+ENV HEAP="-Xms128m -Xmx256m"
 
 # Start the application
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "10000"]
