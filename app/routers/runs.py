@@ -84,6 +84,7 @@ def get_run_summary(run_id: int, db: Session = Depends(get_db)):
         "passed": summary["passed"],
         "overall": summary.get("overall"),
         "transactions": summary.get("transactions", []),
+        "samplers": summary.get("samplers", []),
     }
 
 

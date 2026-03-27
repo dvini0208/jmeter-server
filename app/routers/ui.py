@@ -802,7 +802,8 @@ def ui_home():
             </div>
 
             <div style="margin-top:20px;">
-                <div class="sub-title">Transaction Metrics</div>
+                <div class="sub-title">Transaction Controllers</div>
+                <p style="margin:4px 0 10px;color:var(--muted);font-size:13px;">Aggregated transaction times (total elapsed per transaction flow)</p>
                 <div class="table-wrap">
                     <table>
                         <thead>
@@ -823,6 +824,34 @@ def ui_home():
                         </thead>
                         <tbody id="transactionMetricsBody">
                             <tr><td colspan="12">No transaction data yet.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div style="margin-top:20px;">
+                <div class="sub-title">Individual Samplers</div>
+                <p style="margin:4px 0 10px;color:var(--muted);font-size:13px;">Individual HTTP request metrics</p>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Sampler</th>
+                                <th>Samples</th>
+                                <th>Errors</th>
+                                <th>Error%</th>
+                                <th>Avg(ms)</th>
+                                <th>Min(ms)</th>
+                                <th>Max(ms)</th>
+                                <th>Median</th>
+                                <th>P90</th>
+                                <th>P95</th>
+                                <th>P99</th>
+                                <th>TPS</th>
+                            </tr>
+                        </thead>
+                        <tbody id="samplerMetricsBody">
+                            <tr><td colspan="12">No sampler data yet.</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -1471,6 +1500,7 @@ def ui_home():
                     ${metricRow("Passed", latestSummary.passed)}
                 `;
 
+                // Populate Transaction Controllers table
                 const txns = latestSummary.transactions || [];
                 const txnBody = document.getElementById("transactionMetricsBody");
                 if (txns.length > 0) {
@@ -1489,7 +1519,29 @@ def ui_home():
                         <td>${t.throughput}</td>
                     </tr>`).join("");
                 } else {
-                    txnBody.innerHTML = '<tr><td colspan="12">No transaction data yet.</td></tr>';
+                    txnBody.innerHTML = '<tr><td colspan="12">No transaction controller data.</td></tr>';
+                }
+
+                // Populate Individual Samplers table
+                const smps = latestSummary.samplers || [];
+                const smpBody = document.getElementById("samplerMetricsBody");
+                if (smps.length > 0) {
+                    smpBody.innerHTML = smps.map(t => `<tr>
+                        <td>${t.label}</td>
+                        <td>${t.count}</td>
+                        <td>${t.error_count}</td>
+                        <td>${t.error_pct}%</td>
+                        <td>${t.avg}</td>
+                        <td>${t.min}</td>
+                        <td>${t.max}</td>
+                        <td>${t.median}</td>
+                        <td>${t.p90}</td>
+                        <td>${t.p95}</td>
+                        <td>${t.p99}</td>
+                        <td>${t.throughput}</td>
+                    </tr>`).join("");
+                } else {
+                    smpBody.innerHTML = '<tr><td colspan="12">No sampler data yet.</td></tr>';
                 }
 
                 document.getElementById("latestFailureReason").textContent =

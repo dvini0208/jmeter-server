@@ -18,10 +18,7 @@ def _percentile(sorted_values: list, pct: float) -> float:
 
 
 def _compute_transaction_stats(samples: list) -> dict:
-    """Compute detailed stats for a list of response time samples.
-    Each sample is a dict with 'elapsed' (int ms), 'success' (bool),
-    and 'timestamp' (int ms epoch).
-    """
+    """Compute detailed stats for a list of response time samples."""
     if not samples:
         return {
             "count": 0, "error_count": 0, "error_pct": 0.0,
@@ -67,10 +64,7 @@ def _compute_transaction_stats(samples: list) -> dict:
 
 
 def _is_parent_sample(row: dict) -> bool:
-    """Detect Transaction Controller parent (aggregate) samples.
-    Parent samples aggregate multiple child samples and have inflated
-    elapsed times (sum of all children). Including them skews metrics.
-    """
+    """Detect Transaction Controller parent (aggregate) samples."""
     # SampleCount > 1 means this is a parent/aggregate sample
     sample_count = row.get("SampleCount", "")
     if sample_count:
@@ -81,7 +75,6 @@ def _is_parent_sample(row: dict) -> bool:
             pass
 
     # If URL column exists and is empty, it's likely a Transaction Controller
-    # (real HTTP samplers always have a URL)
     url = row.get("URL", None)
     if url is not None and url.strip() == "":
         return True
@@ -89,24 +82,24 @@ def _is_parent_sample(row: dict) -> bool:
     return False
 
 
-def _parse_csv_rows(path: Path) -> list:
-    """Parse JTL CSV file and return list of sample dicts,
-    filtering out Transaction Controller parent samples."""
-    samples = []
+def _parse_csv_rows(path: Path) -> tuple:
+    """Parse JTL CSV file and return (sampler_samples, transaction_samples).
+    Samplers = individual HTTP requests.
+    Transactions = Transaction Controller parent/aggregate samples.
+    """
+    samplers = []
+    transactions = []
+
     with path.open("r", encoding="utf-8", errors="ignore", newline="") as f:
         reader = csv.DictReader(f)
         if not reader.fieldnames:
-            return samples
+            return samplers, transactions
 
         has_url_column = "URL" in reader.fieldnames
         has_sample_count = "SampleCount" in reader.fieldnames
+        can_detect_parents = has_url_column or has_sample_count
 
         for row in reader:
-            # Filter out Transaction Controller parent/aggregate samples
-            if has_url_column or has_sample_count:
-                if _is_parent_sample(row):
-                    continue
-
             try:
                 elapsed = int(row.get("elapsed", 0))
             except (ValueError, TypeError):
@@ -121,132 +114,132 @@ def _parse_csv_rows(path: Path) -> list:
 
             label = row.get("label", "Unknown")
 
-            samples.append({
+            sample = {
                 "label": label,
                 "elapsed": elapsed,
                 "timestamp": timestamp,
                 "success": success,
-            })
-    return samples
+            }
+
+            if can_detect_parents and _is_parent_sample(row):
+                transactions.append(sample)
+            else:
+                samplers.append(sample)
+
+    return samplers, transactions
 
 
-def _parse_xml_rows(path: Path) -> list:
-    """Parse JTL XML file and return list of sample dicts.
-    Only includes leaf samples (not parent aggregates)."""
-    samples = []
+def _parse_xml_rows(path: Path) -> tuple:
+    """Parse JTL XML file and return (sampler_samples, transaction_samples)."""
+    samplers = []
+    transactions = []
+
     tree = ET.parse(str(path))
     root = tree.getroot()
 
-    def _collect_leaf_samples(parent):
-        """Recursively collect only leaf-level samples (no sub-samples)."""
+    def _extract_sample(elem):
+        try:
+            elapsed = int(elem.attrib.get("t", 0))
+        except (ValueError, TypeError):
+            elapsed = 0
+        try:
+            timestamp = int(elem.attrib.get("ts", 0))
+        except (ValueError, TypeError):
+            timestamp = 0
+
+        success_value = str(elem.attrib.get("s", "")).strip().lower()
+        success = success_value not in {"false", "0"}
+
+        label = elem.attrib.get("lb", "Unknown")
+
+        return {
+            "label": label,
+            "elapsed": elapsed,
+            "timestamp": timestamp,
+            "success": success,
+        }
+
+    def _collect_samples(parent):
         for elem in parent:
             if elem.tag in ("sample", "httpSample"):
                 children = list(elem.findall("sample")) + list(elem.findall("httpSample"))
                 if children:
-                    # This is a parent sample - skip it, recurse into children
-                    _collect_leaf_samples(elem)
+                    # Parent sample (Transaction Controller) - add to transactions
+                    transactions.append(_extract_sample(elem))
+                    # Recurse into children for individual samplers
+                    _collect_samples(elem)
                 else:
-                    # This is a leaf sample - include it
-                    try:
-                        elapsed = int(elem.attrib.get("t", 0))
-                    except (ValueError, TypeError):
-                        elapsed = 0
-                    try:
-                        timestamp = int(elem.attrib.get("ts", 0))
-                    except (ValueError, TypeError):
-                        timestamp = 0
+                    # Leaf sample (individual HTTP request)
+                    samplers.append(_extract_sample(elem))
 
-                    success_value = str(elem.attrib.get("s", "")).strip().lower()
-                    success = success_value not in {"false", "0"}
+    _collect_samples(root)
 
-                    label = elem.attrib.get("lb", "Unknown")
-
-                    samples.append({
-                        "label": label,
-                        "elapsed": elapsed,
-                        "timestamp": timestamp,
-                        "success": success,
-                    })
-
-    _collect_leaf_samples(root)
-
-    # Fallback: if no leaf samples found, parse flat (no nesting in this JTL)
-    if not samples:
+    # Fallback: if no structured nesting, treat all as samplers
+    if not samplers and not transactions:
         for elem in root:
-            try:
-                elapsed = int(elem.attrib.get("t", 0))
-            except (ValueError, TypeError):
-                elapsed = 0
-            try:
-                timestamp = int(elem.attrib.get("ts", 0))
-            except (ValueError, TypeError):
-                timestamp = 0
+            samplers.append(_extract_sample(elem))
 
-            success_value = str(elem.attrib.get("s", "")).strip().lower()
-            success = success_value not in {"false", "0"}
+    return samplers, transactions
 
-            label = elem.attrib.get("lb", "Unknown")
 
-            samples.append({
-                "label": label,
-                "elapsed": elapsed,
-                "timestamp": timestamp,
-                "success": success,
-            })
+def _build_grouped_stats(samples: list) -> list:
+    """Group samples by label and compute per-label stats."""
+    by_label = defaultdict(list)
+    for s in samples:
+        by_label[s["label"]].append(s)
 
-    return samples
+    result = []
+    for label in sorted(by_label.keys()):
+        stats = _compute_transaction_stats(by_label[label])
+        stats["label"] = label
+        result.append(stats)
+    return result
 
 
 def parse_jtl_summary(jtl_path: str) -> dict:
     path = Path(jtl_path)
 
+    empty_result = {
+        "exists": False,
+        "total_samples": 0,
+        "error_count": 0,
+        "error_percentage": 0.0,
+        "passed": False,
+        "transactions": [],
+        "samplers": [],
+    }
+
     if not path.exists():
-        return {
-            "exists": False,
-            "total_samples": 0,
-            "error_count": 0,
-            "error_percentage": 0.0,
-            "passed": False,
-            "transactions": [],
-        }
+        return empty_result
 
     # Try CSV first, then XML
-    samples = []
+    sampler_samples = []
+    transaction_samples = []
+
     try:
-        samples = _parse_csv_rows(path)
+        sampler_samples, transaction_samples = _parse_csv_rows(path)
     except Exception:
         pass
 
-    if not samples:
+    if not sampler_samples and not transaction_samples:
         try:
-            samples = _parse_xml_rows(path)
+            sampler_samples, transaction_samples = _parse_xml_rows(path)
         except Exception:
-            return {
-                "exists": True,
-                "total_samples": 0,
-                "error_count": 0,
-                "error_percentage": 0.0,
-                "passed": False,
-                "transactions": [],
-            }
+            empty_result["exists"] = True
+            return empty_result
 
-    total = len(samples)
-    errors = sum(1 for s in samples if not s["success"])
+    # Use samplers for overall stats (individual request metrics)
+    all_for_overall = sampler_samples if sampler_samples else transaction_samples
+    total = len(all_for_overall)
+    errors = sum(1 for s in all_for_overall if not s["success"])
     error_pct = (errors / total * 100) if total else 0.0
 
-    # Group by transaction label and compute per-transaction stats
-    by_label = defaultdict(list)
-    for s in samples:
-        by_label[s["label"]].append(s)
+    # Build per-label stats for both categories
+    sampler_stats = _build_grouped_stats(sampler_samples)
+    transaction_stats = _build_grouped_stats(transaction_samples)
 
-    transactions = []
-    for label in sorted(by_label.keys()):
-        stats = _compute_transaction_stats(by_label[label])
-        stats["label"] = label
-        transactions.append(stats)
-
-    # Also compute overall stats
-    overall = _compute_transaction_stats(samples)
+    # Overall stats from individual samplers
+    overall = _compute_transaction_stats(all_for_overall)
 
     return {
         "exists": True,
@@ -255,5 +248,6 @@ def parse_jtl_summary(jtl_path: str) -> dict:
         "error_percentage": round(error_pct, 2),
         "passed": total > 0 and errors == 0,
         "overall": overall,
-        "transactions": transactions,
+        "transactions": transaction_stats,
+        "samplers": sampler_stats,
     }

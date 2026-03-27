@@ -53,6 +53,7 @@ def build_run_summary(run: TestRun):
         "passed": summary["passed"],
         "overall": summary.get("overall"),
         "transactions": summary.get("transactions", []),
+        "samplers": summary.get("samplers", []),
     }
 
 
